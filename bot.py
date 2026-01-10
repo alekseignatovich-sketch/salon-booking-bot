@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Telegram-бот для записи на услуги (салон, тренер, репетитор)
-Версия: 2.2 — полная поддержка 7 дней, 10-20, один мастер, надёжная отмена
+Версия: 2.3 — с брендированием, баннером и улучшенным UX
 """
 
 import os
@@ -23,6 +23,10 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 from dotenv import load_dotenv
+
+# === НАСТРОЙКИ БРЕНДА ===
+BRAND_NAME = "Salon «LUMIÈRE»"
+BANNER_URL = "https://i.ibb.co/ZRCHg4Zg/1768049391-1.png"  # ← твоя ссылка
 
 # === ЗАГРУЗКА НАСТРОЕК ===
 load_dotenv()
@@ -53,9 +57,7 @@ sheet = client.open_by_key(SPREADSHEET_ID).sheet1
 
 # === ГЕНЕРАЦИЯ СЛОТОВ (10:00–20:00, 1 час) ===
 def get_available_times(date_str: str) -> list:
-    """Возвращает свободные слоты с 10:00 до 20:00 (1 час), исключая занятые (любая услуга)"""
-    all_slots = [f"{h:02d}:00" for h in range(10, 20)]  # 10:00–19:00
-    
+    all_slots = [f"{h:02d}:00" for h in range(10, 20)]
     try:
         records = sheet.get_all_records()
         target_date = datetime.strptime(date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
@@ -80,23 +82,35 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 
-# === /start ===
+# === /start с баннером ===
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
+    
+    # Отправляем баннер
+    await bot.send_photo(
+        chat_id=message.chat.id,
+        photo=BANNER_URL,
+        caption=(
+            f"💇‍♀️ **{BRAND_NAME}**\n"
+            "✨ Ваш персональный помощник по записи\n\n"
+            "Выберите, пожалуйста:"
+        ),
+        parse_mode="Markdown"
+    )
+    
+    # Кнопки под фото
     kb = InlineKeyboardBuilder()
-    kb.button(text="✂️ Стрижка", callback_data="service:Стрижка")
-    kb.button(text="🎨 Окрашивание", callback_data="service:Окрашивание")
-    kb.button(text="💅 Маникюр", callback_data="service:Маникюр")
+    kb.button(text="❄️ Стрижка", callback_data="service:Стрижка")
+    kb.button(text="❄️ Окрашивание", callback_data="service:Окрашивание")
+    kb.button(text="❄️ Маникюр", callback_data="service:Маникюр")
     kb.button(text="❌ Отменить запись", callback_data="action:cancel")
     kb.adjust(1)
-    await message.answer(
-        "👋 Привет! Я помогу записаться на услугу.\n\nВыберите, пожалуйста:",
-        reply_markup=kb.as_markup()
-    )
+    
+    await message.answer("👇", reply_markup=kb.as_markup())
     await state.set_state(BookingStates.choosing_service)
 
-# === ВЫБОР ДАТЫ (7 дней вперёд) ===
+# === ВЫБОР ДАТЫ ===
 @router.callback_query(BookingStates.choosing_service, F.data.startswith("service:"))
 async def choose_date(callback: CallbackQuery, state: FSMContext):
     service = callback.data.split(":", 1)[1]
@@ -201,10 +215,9 @@ async def save_booking(message: Message, state: FSMContext):
         await message.answer("❌ Введите телефон.")
         return
 
-    # Сохраняем ТОЛЬКО ЦИФРЫ (надёжно для поиска)
     phone_digits = re.sub(r"\D", "", phone_input)
     if len(phone_digits) < 9:
-        await message.answer("❌ Слишком короткий номер. Попробуйте снова.")
+        await message.answer("❌ Слишком короткий номер.")
         return
 
     data = await state.get_data()
@@ -225,7 +238,7 @@ async def save_booking(message: Message, state: FSMContext):
             time_str,
             service,
             name,
-            phone_digits,  # ← только цифры!
+            phone_digits,
             str(message.from_user.id),
             datetime.now().strftime("%d.%m.%Y %H:%M")
         ])
@@ -235,12 +248,13 @@ async def save_booking(message: Message, state: FSMContext):
         return
 
     await message.answer(
-        f"✅ **Вы записаны!**\n"
-        f"📅 {date_readable} в {time_str}\n"
-        f"💇‍♀️ {service}\n"
-        f"👤 {name}\n"
-        f"📞 {phone_input}\n\n"
-        f"ℹ️ Чтобы отменить — отправьте /start → «Отменить запись»."
+        f"✅ **СПАСИБО ЗА ДОВЕРИЕ!**\n\n"
+        f"📅 **Дата**: {date_readable}\n"
+        f"🕗 **Время**: {time_str}\n"
+        f"💇‍♀️ **Услуга**: {service}\n"
+        f"👤 **Имя**: {name}\n\n"
+        "📍 Мы находимся: ул. Центральная, 15\n"
+        "📱 Чтобы отменить — отправьте /start → «Отменить запись»."
     )
     await state.clear()
 
@@ -271,7 +285,6 @@ async def handle_cancel_phone(message: Message, state: FSMContext):
         user_bookings = []
         for idx, row in enumerate(records, start=2):
             raw_phone = str(row.get("Телефон", "")).strip()
-            # Убираем апостроф Google Sheets
             if raw_phone.startswith("'"):
                 raw_phone = raw_phone[1:]
             table_digits = re.sub(r"\D", "", raw_phone)
