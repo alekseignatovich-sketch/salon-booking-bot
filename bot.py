@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Telegram-бот для записи на услуги (салон, тренер, репетитор)
-Версия: 2.1 — 7 дней, 10-20, один мастер, исправлена отмена
+Версия: 2.2 — полная поддержка 7 дней, 10-20, один мастер, надёжная отмена
 """
 
 import os
@@ -53,7 +53,7 @@ sheet = client.open_by_key(SPREADSHEET_ID).sheet1
 
 # === ГЕНЕРАЦИЯ СЛОТОВ (10:00–20:00, 1 час) ===
 def get_available_times(date_str: str) -> list:
-    """Возвращает свободные слоты с 10:00 до 20:00 (1 час), исключая занятые"""
+    """Возвращает свободные слоты с 10:00 до 20:00 (1 час), исключая занятые (любая услуга)"""
     all_slots = [f"{h:02d}:00" for h in range(10, 20)]  # 10:00–19:00
     
     try:
@@ -102,7 +102,6 @@ async def choose_date(callback: CallbackQuery, state: FSMContext):
     service = callback.data.split(":", 1)[1]
     await state.update_data(chosen_service=service)
 
-    # Даты: завтра + 6 дней = 7 дней всего
     next_7 = [datetime.now().date() + timedelta(days=i) for i in range(1, 8)]
     available_dates = [d.strftime("%Y-%m-%d") for d in next_7]
 
@@ -198,10 +197,14 @@ async def enter_phone(message: Message, state: FSMContext):
 @router.message(BookingStates.entering_phone)
 async def save_booking(message: Message, state: FSMContext):
     phone_input = message.text.strip()
-    phone_clean = re.sub(r"[^\d+]", "", phone_input)  # Только + и цифры
+    if not phone_input:
+        await message.answer("❌ Введите телефон.")
+        return
 
-    if not re.match(r"^\+375\d{9}$|^\+7\d{10}$|^\+3\d{9,12}$", phone_clean):
-        await message.answer("❌ Неверный формат. Пример: +375291234567")
+    # Сохраняем ТОЛЬКО ЦИФРЫ (надёжно для поиска)
+    phone_digits = re.sub(r"\D", "", phone_input)
+    if len(phone_digits) < 9:
+        await message.answer("❌ Слишком короткий номер. Попробуйте снова.")
         return
 
     data = await state.get_data()
@@ -217,13 +220,12 @@ async def save_booking(message: Message, state: FSMContext):
     date_readable = datetime.strptime(date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
 
     try:
-        # Сохраняем ОЧИЩЕННЫЙ телефон (без кавычек!)
         sheet.append_row([
             date_readable,
             time_str,
             service,
             name,
-            phone_clean,  # ← КЛЮЧЕВОЙ МОМЕНТ
+            phone_digits,  # ← только цифры!
             str(message.from_user.id),
             datetime.now().strftime("%d.%m.%Y %H:%M")
         ])
@@ -255,9 +257,12 @@ async def start_cancel(callback: CallbackQuery, state: FSMContext):
 @router.message(BookingStates.cancel_by_phone)
 async def handle_cancel_phone(message: Message, state: FSMContext):
     phone_input = message.text.strip()
-    phone_clean = re.sub(r"[^\d+]", "", phone_input)  # Тот же формат!
+    if not phone_input:
+        await message.answer("❌ Введите телефон.")
+        return
 
-    if not re.match(r"^\+375\d{9}$|^\+7\d{10}$|^\+3\d{9,12}$", phone_clean):
+    user_digits = re.sub(r"\D", "", phone_input)
+    if len(user_digits) < 9:
         await message.answer("❌ Неверный формат.")
         return
 
@@ -265,11 +270,12 @@ async def handle_cancel_phone(message: Message, state: FSMContext):
         records = sheet.get_all_records()
         user_bookings = []
         for idx, row in enumerate(records, start=2):
-            # Получаем телефон из таблицы — он должен быть уже очищен!
-            table_phone = str(row.get("Телефон", "")).strip()
-            # Удаляем возможные кавычки, если они есть (на всякий случай)
-            table_phone_clean = re.sub(r"[^\d+]", "", table_phone)
-            if phone_clean == table_phone_clean:
+            raw_phone = str(row.get("Телефон", "")).strip()
+            # Убираем апостроф Google Sheets
+            if raw_phone.startswith("'"):
+                raw_phone = raw_phone[1:]
+            table_digits = re.sub(r"\D", "", raw_phone)
+            if user_digits == table_digits:
                 user_bookings.append({
                     "row": idx,
                     "date": row["Дата"],
